@@ -35,106 +35,14 @@ class PermissionCheckWorker(context: Context, params: WorkerParameters) :
 
     override fun doWork(): Result {
         val context = applicationContext
-        val pm = context.packageManager
-        val usageStatsManager =
-            context.getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
-
-        val dbHelper = DatabaseHelper(context)
-        val previousHighRiskPackages = dbHelper.getPreviousHighRiskPackages()
-
         val prefs: SharedPreferences =
             context.getSharedPreferences("permguard_notify_prefs", Context.MODE_PRIVATE)
-
         val endTime = System.currentTimeMillis()
-        val startTime = endTime - (7L * 24 * 60 * 60 * 1000)
 
-        val usageStatsList = usageStatsManager.queryUsageStats(
-            UsageStatsManager.INTERVAL_BEST, startTime, endTime
-        )
-        val foregroundTimeMap = usageStatsList
-            .groupBy { it.packageName }
-            .mapValues { (_, list) -> list.sumOf { it.totalTimeInForeground } }
+        val scanResult = PermissionScanner.performScan(context, "Background check")
+            ?: return Result.retry() // Another scan in progress, retry later
 
-        val lastUsedMap = mutableMapOf<String, Long>()
-        val events = usageStatsManager.queryEvents(startTime, endTime)
-        val event = UsageEvents.Event()
-        while (events.hasNextEvent()) {
-            events.getNextEvent(event)
-            if (event.eventType == UsageEvents.Event.MOVE_TO_FOREGROUND ||
-                event.eventType == UsageEvents.Event.ACTIVITY_RESUMED
-            ) {
-                val current = lastUsedMap[event.packageName] ?: 0L
-                if (event.timeStamp > current) {
-                    lastUsedMap[event.packageName] = event.timeStamp
-                }
-            }
-        }
-
-        val usageMap = (foregroundTimeMap.keys + lastUsedMap.keys).associateWith { pkg ->
-            Pair(lastUsedMap[pkg] ?: 0L, foregroundTimeMap[pkg] ?: 0L)
-        }
-
-        val installedApps = pm.getInstalledPackages(PackageManager.GET_PERMISSIONS)
-            .filter { pm.getLaunchIntentForPackage(it.packageName) != null }
-
-        val riskList = mutableListOf<AppRisk>()
-        val dateFormat = SimpleDateFormat("dd MMM, hh:mm a", Locale.getDefault())
-
-        for (appInfo in installedApps) {
-            val grantedPermissions = appInfo.requestedPermissions?.filterIndexed { index, perm ->
-                perm in sensitivePermissions &&
-                        (appInfo.requestedPermissionsFlags?.get(index)?.and(
-                            android.content.pm.PackageInfo.REQUESTED_PERMISSION_GRANTED
-                        ) != 0)
-            } ?: emptyList()
-
-            if (grantedPermissions.isNotEmpty()) {
-                val appName = pm.getApplicationLabel(appInfo.applicationInfo!!).toString()
-                val stats = usageMap[appInfo.packageName]
-                val foregroundTimeMs = stats?.second ?: 0L
-                val foregroundMinutes = foregroundTimeMs / 60000
-                val lastUsedTime = if (stats != null && stats.first > 0) {
-                    dateFormat.format(Date(stats.first))
-                } else {
-                    "Never used"
-                }
-
-                val isSystem = (appInfo.applicationInfo!!.flags and
-                        ApplicationInfo.FLAG_SYSTEM) != 0
-
-                val risk = when {
-                    grantedPermissions.size >= 2 && foregroundMinutes < 5 -> "HIGH"
-                    grantedPermissions.size >= 1 && foregroundMinutes < 15 -> "MEDIUM"
-                    else -> "LOW"
-                }
-
-                riskList.add(
-                    AppRisk(
-                        appName = appName,
-                        packageName = appInfo.packageName,
-                        permissions = grantedPermissions.map { it.substringAfterLast(".") },
-                        foregroundMinutes = foregroundMinutes,
-                        riskLevel = risk,
-                        isSystemApp = isSystem,
-                        lastUsedTime = lastUsedTime
-                    )
-                )
-            }
-        }
-
-        riskList.sortWith(
-            compareBy<AppRisk> { it.isSystemApp }
-                .thenByDescending {
-                    when (it.riskLevel) {
-                        "HIGH" -> 2
-                        "MEDIUM" -> 1
-                        else -> 0
-                    }
-                }
-        )
-
-        val now = SimpleDateFormat("dd MMM yyyy, hh:mm a", Locale.getDefault()).format(Date())
-        dbHelper.saveScanResults(riskList, now)
+        val riskList = scanResult.riskList
 
         // Now includes HIGH and MEDIUM in the notification pipeline.
         // Dedup is based ONLY on the SharedPreferences "last notified" timestamp,

@@ -120,14 +120,22 @@ class MainActivity : ComponentActivity() {
         focusedPackage = intent.getStringExtra("focus_package")
     }
 
+    private var isReturningFromSettings = false
+
     override fun onResume() {
         super.onResume()
-        val (savedResults, savedTime) = dbHelper.loadLastScan()
-        if (savedResults.isNotEmpty()) {
-            riskList.clear()
-            riskList.addAll(savedResults)
-            lastScanTime = savedTime
-            hasAnalyzed = true
+        if (isReturningFromSettings) {
+            isReturningFromSettings = false
+            // User just returned from settings: trigger safe immediate recheck
+            runAnalysis("Returned from Settings")
+        } else {
+            val (savedResults, savedTime) = dbHelper.loadLastScan()
+            if (savedResults.isNotEmpty()) {
+                riskList.clear()
+                riskList.addAll(savedResults)
+                lastScanTime = savedTime
+                hasAnalyzed = true
+            }
         }
     }
 
@@ -155,107 +163,18 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun openUsageAccessSettings() {
+        isReturningFromSettings = true
         startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
     }
 
-    private fun runAnalysis() {
-        riskList.clear()
-        val pm = packageManager
-        val usageStatsManager = getSystemService(USAGE_STATS_SERVICE) as UsageStatsManager
-
-        val endTime = System.currentTimeMillis()
-        val startTime = endTime - (7L * 24 * 60 * 60 * 1000)
-
-        // Foreground time per app (aggregated)
-        val usageStatsList = usageStatsManager.queryUsageStats(
-            UsageStatsManager.INTERVAL_BEST, startTime, endTime
-        )
-        val foregroundTimeMap = usageStatsList
-            .groupBy { it.packageName }
-            .mapValues { (_, list) -> list.sumOf { it.totalTimeInForeground } }
-
-        // Last-used time per app (from raw events, more reliable)
-        val lastUsedMap = mutableMapOf<String, Long>()
-        val events = usageStatsManager.queryEvents(startTime, endTime)
-        val event = UsageEvents.Event()
-        while (events.hasNextEvent()) {
-            events.getNextEvent(event)
-            if (event.eventType == UsageEvents.Event.MOVE_TO_FOREGROUND ||
-                event.eventType == UsageEvents.Event.ACTIVITY_RESUMED
-            ) {
-                val current = lastUsedMap[event.packageName] ?: 0L
-                if (event.timeStamp > current) {
-                    lastUsedMap[event.packageName] = event.timeStamp
-                }
-            }
+    private fun runAnalysis(reason: String = "Manual scan") {
+        val scanResult = PermissionScanner.performScan(this, reason)
+        if (scanResult != null) {
+            riskList.clear()
+            riskList.addAll(scanResult.riskList)
+            lastScanTime = scanResult.formattedScanTime
+            hasAnalyzed = true
         }
-
-        val usageMap = (foregroundTimeMap.keys + lastUsedMap.keys).associateWith { pkg ->
-            Pair(lastUsedMap[pkg] ?: 0L, foregroundTimeMap[pkg] ?: 0L)
-        }
-
-        val installedApps = pm.getInstalledPackages(PackageManager.GET_PERMISSIONS)
-            .filter { pm.getLaunchIntentForPackage(it.packageName) != null }
-
-        val dateFormat = SimpleDateFormat("dd MMM, hh:mm a", Locale.getDefault())
-
-        for (appInfo in installedApps) {
-            val grantedPermissions = appInfo.requestedPermissions?.filterIndexed { index, perm ->
-                perm in sensitivePermissions &&
-                        (appInfo.requestedPermissionsFlags?.get(index)?.and(
-                            android.content.pm.PackageInfo.REQUESTED_PERMISSION_GRANTED
-                        ) != 0)
-            } ?: emptyList()
-
-            if (grantedPermissions.isNotEmpty()) {
-                val appName = pm.getApplicationLabel(appInfo.applicationInfo!!).toString()
-                val stats = usageMap[appInfo.packageName]
-                val foregroundTimeMs = stats?.second ?: 0L
-                val foregroundMinutes = foregroundTimeMs / 60000
-                val lastUsedTime = if (stats != null && stats.first > 0) {
-                    dateFormat.format(Date(stats.first))
-                } else {
-                    "Never used"
-                }
-
-                val isSystem = (appInfo.applicationInfo!!.flags and
-                        ApplicationInfo.FLAG_SYSTEM) != 0
-
-                val risk = when {
-                    grantedPermissions.size >= 2 && foregroundMinutes < 5 -> "HIGH"
-                    grantedPermissions.size >= 1 && foregroundMinutes < 15 -> "MEDIUM"
-                    else -> "LOW"
-                }
-
-                riskList.add(
-                    AppRisk(
-                        appName = appName,
-                        packageName = appInfo.packageName,
-                        permissions = grantedPermissions.map { it.substringAfterLast(".") },
-                        foregroundMinutes = foregroundMinutes,
-                        riskLevel = risk,
-                        isSystemApp = isSystem,
-                        lastUsedTime = lastUsedTime
-                    )
-                )
-            }
-        }
-
-        riskList.sortWith(
-            compareBy<AppRisk> { it.isSystemApp }
-                .thenByDescending {
-                    when (it.riskLevel) {
-                        "HIGH" -> 2
-                        "MEDIUM" -> 1
-                        else -> 0
-                    }
-                }
-        )
-        hasAnalyzed = true
-2
-        val now = SimpleDateFormat("dd MMM yyyy, hh:mm a", Locale.getDefault()).format(Date())
-        dbHelper.saveScanResults(riskList, now)
-        lastScanTime = now
     }
 }
 
