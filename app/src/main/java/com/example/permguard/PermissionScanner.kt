@@ -62,6 +62,8 @@ object PermissionScanner {
      * - HIGH: >= 2 sensitive permissions AND < 5 minutes foreground usage in 7 days.
      * - MEDIUM: >= 1 sensitive permission AND < 15 minutes foreground usage in 7 days.
      * - LOW: All other cases.
+     *
+     * This score is kept separately from the CombinedRiskResult score.
      */
     fun calculateRisk(grantedCount: Int, foregroundMinutes: Long): String {
         return when {
@@ -80,13 +82,13 @@ object PermissionScanner {
 
     /**
      * Performs a full scan of installed applications, queries usage stats,
-     * calculates risk scores, and updates the local SQLite database.
+     * calculates risk scores, integrates data usage and network findings,
+     * and updates the local SQLite database.
      *
      * Returns null if a scan is already running (duplicate scan prevention).
      */
     fun performScan(context: Context, scanReason: String = "Manual"): ScanResult? {
         if (!isScanInProgress.compareAndSet(false, true)) {
-            // Another scan is already active; skip to avoid race conditions.
             return null
         }
 
@@ -133,6 +135,10 @@ object PermissionScanner {
             val installedApps = pm.getInstalledPackages(PackageManager.GET_PERMISSIONS)
                 .filter { pm.getLaunchIntentForPackage(it.packageName) != null }
 
+            // Load existing Burp findings for per-app scoring
+            val dbHelper = DatabaseHelper(context)
+            val allFindings = dbHelper.loadAllFindings()
+
             val riskList = mutableListOf<AppRisk>()
             val dateFormat = SimpleDateFormat("dd MMM, hh:mm a", Locale.getDefault())
 
@@ -162,6 +168,31 @@ object PermissionScanner {
 
                     val risk = calculateRisk(grantedPermissions.size, foregroundMinutes)
 
+                    // Collect data usage (best-effort; null = unavailable, not zero)
+                    val uid = appInfo.applicationInfo!!.uid
+                    val dataUsage = DataUsageCollector.collect(context, appInfo.packageName, uid)
+
+                    // Find any Burp findings attributed to this package
+                    val packageFindings = allFindings
+                        .filter { it.attributedPackage == appInfo.packageName }
+                        .map { NetworkFinding(it.severity) }
+
+                    // Compute combined risk score
+                    val combinedResult = RiskEngine.computeCombinedRisk(
+                        appRisk = AppRisk(
+                            appName = appName,
+                            packageName = appInfo.packageName,
+                            permissions = grantedPermissions.map { it.substringAfterLast(".") },
+                            foregroundMinutes = foregroundMinutes,
+                            riskLevel = risk,
+                            isSystemApp = isSystem,
+                            lastUsedTime = lastUsedTime
+                        ),
+                        usageAccessGranted = usageGranted,
+                        dataUsage = dataUsage,
+                        networkFindings = packageFindings
+                    )
+
                     riskList.add(
                         AppRisk(
                             appName = appName,
@@ -170,7 +201,12 @@ object PermissionScanner {
                             foregroundMinutes = foregroundMinutes,
                             riskLevel = risk,
                             isSystemApp = isSystem,
-                            lastUsedTime = lastUsedTime
+                            lastUsedTime = lastUsedTime,
+                            dataUsage = dataUsage,
+                            permissionScore = combinedResult.totalScore, // reuse field for permission evidence
+                            combinedScore = combinedResult.totalScore,
+                            scoreExplanations = combinedResult.explanations,
+                            networkFindingsCount = packageFindings.size
                         )
                     )
                 }
@@ -189,7 +225,6 @@ object PermissionScanner {
 
             val now = SimpleDateFormat("dd MMM yyyy, hh:mm a", Locale.getDefault()).format(Date())
             val formattedScanTime = "$now ($scanReason)"
-            val dbHelper = DatabaseHelper(context)
             dbHelper.saveScanResults(riskList, formattedScanTime)
 
             return ScanResult(
