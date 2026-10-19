@@ -1,0 +1,9 @@
+{
+  "name": "PermGuard",
+  "description": "Silent Permission Abuse & Network Risk Detector for mobile applications, analyzing permissions, background usage, and network vulnerability findings.",
+  "requestFrame": "browser",
+  "permissions": [],
+  "capabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

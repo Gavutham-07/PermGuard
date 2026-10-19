@@ -1,0 +1,6 @@
+{
+  "summary": "Implementation plan to fix risk scoring inconsistencies, add search/sort/filter controls, implement change detection notifications, and build the real-time Burp Suite Montoya extension and local authenticated bridge.",
+  "updatedAt": "2026-10-19T15:26:09.344548531Z",
+  "requestFeedback": true,
+  "userFacing": true
+}

@@ -1,0 +1,6 @@
+{
+  "appId": "com.example.permguard",
+  "appName": "PermGuard",
+  "webDir": "dist",
+  "bundledWebRuntime": false
+}
