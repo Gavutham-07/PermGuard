@@ -1,0 +1,8 @@
+# PermGuard Burp Suite Findings Import Sample (v1)
+# Format: severity,host,path,issue_name,attribution
+# - severity: HIGH, MEDIUM, LOW, or INFORMATION
+# - attribution: optional Android package name (e.g. com.example.app)
+severity,host,path,issue_name,attribution
+HIGH,api.example.com,/v1/login,Cleartext HTTP Transmission,com.google.android.googlequicksearchbox
+MEDIUM,cdn.example.com,/assets,Missing Cache-Control Header,
+LOW,analytics.example.com,/collect,Verbose Server Banner,
