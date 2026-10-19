@@ -12,6 +12,7 @@ import { AppManagerModal } from './components/AppManagerModal';
 import { BurpBridgeModal } from './components/BurpBridgeModal';
 import { NotificationFeedModal } from './components/NotificationFeedModal';
 import { InstalledAppMock } from './data/defaultApps';
+import { PermGuardScannerPlugin } from './native/PermGuardScannerPlugin';
 
 export function App() {
   const [riskList, setRiskList] = useState<AppRisk[]>([]);
@@ -70,6 +71,7 @@ export function App() {
     syncServerBridgeFindings();
   }, []);
 
+
   // ── Continuous 5-Second Incremental Polling Loop ──
   useEffect(() => {
     if (!isAutoMonitoring) return;
@@ -119,7 +121,8 @@ export function App() {
       const res = await fetch('/api/burp/events', {
         headers: { Authorization: `Bearer ${token}` },
       });
-      if (res.ok) {
+      const contentType = res.headers.get('content-type') || '';
+      if (res.ok && contentType.includes('application/json')) {
         const data = await res.json();
         if (Array.isArray(data.findings) && data.findings.length > 0) {
           const batchId = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 15);
@@ -161,6 +164,30 @@ export function App() {
     },
     [isScanning]
   );
+
+  // Listen for return from native Android Settings
+  useEffect(() => {
+    const handleVisibilityChange = async () => {
+      if (document.visibilityState === 'visible') {
+        const isGranted = await PermGuardScannerPlugin.checkUsageAccess();
+        if (isGranted !== null && isGranted !== usageAccessGranted) {
+          DatabaseHelper.setUsageAccessGranted(isGranted);
+          setUsageAccessGranted(isGranted);
+          runAnalysis('Returned from Android Settings');
+        }
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
+  }, [usageAccessGranted, runAnalysis]);
+
+  const handleOpenGrantAccess = async () => {
+    if (PermGuardScannerPlugin.isNative()) {
+      const opened = await PermGuardScannerPlugin.openUsageSettings();
+      if (opened) return;
+    }
+    setShowGrantAccessModal(true);
+  };
 
   const handleGrantAccessReturn = (didChange: boolean) => {
     setShowGrantAccessModal(false);
@@ -275,7 +302,7 @@ export function App() {
             liveToast={liveToast}
             onDismissToast={() => setLiveToast(null)}
             onStartClick={() => runAnalysis('Manual scan')}
-            onGrantAccessClick={() => setShowGrantAccessModal(true)}
+            onGrantAccessClick={handleOpenGrantAccess}
             onAppClick={(app) => setFocusedPackage(app.packageName)}
             onImportBurpClick={() => setShowBurpModal(true)}
             onShowFindings={() => setShowFindingsScreen(true)}

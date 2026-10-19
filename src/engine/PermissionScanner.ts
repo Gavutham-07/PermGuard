@@ -1,6 +1,7 @@
 import { AppRisk, NetworkFinding, ScanResult } from '../types';
 import { DatabaseHelper } from '../storage/db';
 import { RiskEngine } from './RiskEngine';
+import { PermGuardScannerPlugin } from '../native/PermGuardScannerPlugin';
 
 let isScanInProgress = false;
 
@@ -93,11 +94,9 @@ export const PermissionScanner = {
             });
             updatedList.push(newAppRisk);
           } else {
-            // Keep existing app instance unchanged
             updatedList.push(existing);
           }
         } else {
-          // Newly added app
           changedApps.push({
             app: newAppRisk,
             oldScore: 0,
@@ -119,105 +118,111 @@ export const PermissionScanner = {
     return { updatedList, changedApps };
   },
 
-  performScan(scanReason: string = 'Manual scan'): Promise<ScanResult | null> {
-    if (isScanInProgress) return Promise.resolve(null);
+  async performScan(scanReason: string = 'Manual scan'): Promise<ScanResult | null> {
+    if (isScanInProgress) return null;
     isScanInProgress = true;
 
-    return new Promise((resolve) => {
-      setTimeout(() => {
-        try {
-          const usageGranted = DatabaseHelper.getUsageAccessGranted();
-          const installedApps = DatabaseHelper.getInstalledApps();
-          const allFindings = DatabaseHelper.loadAllFindings();
+    try {
+      // 1. Check if running on real physical Android device via native plugin
+      let usageGranted = DatabaseHelper.getUsageAccessGranted();
+      let installedApps = DatabaseHelper.getInstalledApps();
 
-          const riskList: AppRisk[] = [];
+      const nativeScan = await PermGuardScannerPlugin.scanRealInstalledApps();
+      if (nativeScan && nativeScan.apps.length > 0) {
+        // Use the REAL applications scanned from the user's physical phone!
+        installedApps = nativeScan.apps;
+        usageGranted = nativeScan.usageAccessGranted;
+        DatabaseHelper.setUsageAccessGranted(usageGranted);
+        DatabaseHelper.saveInstalledApps(installedApps);
+      }
 
-          for (const app of installedApps) {
-            const grantedPermissions = app.permissions.filter((p) =>
-              RiskEngine.sensitivePermissions.includes(p)
-            );
+      const allFindings = DatabaseHelper.loadAllFindings();
+      const riskList: AppRisk[] = [];
 
-            if (grantedPermissions.length > 0) {
-              const foregroundMinutes = usageGranted ? app.foregroundMinutes : 0;
-              const lastUsedTime = usageGranted ? app.lastUsedTime : 'Usage access missing';
+      for (const app of installedApps) {
+        const grantedPermissions = app.permissions.filter((p) =>
+          RiskEngine.sensitivePermissions.includes(p)
+        );
 
-              const legacyRisk = RiskEngine.legacyCalculateRisk(
-                grantedPermissions.length,
-                foregroundMinutes
-              );
+        if (grantedPermissions.length > 0) {
+          const foregroundMinutes = usageGranted ? app.foregroundMinutes : 0;
+          const lastUsedTime = usageGranted ? app.lastUsedTime : 'Usage access missing';
 
-              const dataUsage = usageGranted
-                ? app.dataUsage
-                : { mobileBytes: null, wifiBytes: null, available: false };
+          const legacyRisk = RiskEngine.legacyCalculateRisk(
+            grantedPermissions.length,
+            foregroundMinutes
+          );
 
-              const packageFindings: NetworkFinding[] = allFindings
-                .filter((f) => f.attributedPackage === app.packageName)
-                .map((f) => ({ severity: f.severity, confidence: f.confidence || 'HIGH' }));
+          const dataUsage = usageGranted
+            ? app.dataUsage
+            : { mobileBytes: null, wifiBytes: null, available: false };
 
-              const combinedResult = RiskEngine.computeCombinedRisk(
-                {
-                  permissions: grantedPermissions,
-                  foregroundMinutes,
-                },
-                usageGranted,
-                dataUsage,
-                packageFindings
-              );
+          const packageFindings: NetworkFinding[] = allFindings
+            .filter((f) => f.attributedPackage === app.packageName)
+            .map((f) => ({ severity: f.severity, confidence: f.confidence || 'HIGH' }));
 
-              riskList.push({
-                appName: app.appName,
-                packageName: app.packageName,
-                permissions: grantedPermissions,
-                foregroundMinutes,
-                permissionScore: combinedResult.permissionScore,
-                permissionRiskLevel: combinedResult.permissionRiskLevel,
-                combinedScore: combinedResult.totalScore,
-                combinedRiskLevel: combinedResult.level,
-                riskLevel: combinedResult.level,
-                legacyRiskLevel: legacyRisk,
-                isSystemApp: app.isSystemApp,
-                lastUsedTime,
-                dataUsage,
-                scoreExplanations: combinedResult.explanations,
-                networkFindingsCount: packageFindings.length,
-              });
-            }
-          }
+          const combinedResult = RiskEngine.computeCombinedRisk(
+            {
+              permissions: grantedPermissions,
+              foregroundMinutes,
+            },
+            usageGranted,
+            dataUsage,
+            packageFindings
+          );
 
-          // Deterministic sorting with stable secondary key:
-          riskList.sort((a, b) => {
-            if (a.isSystemApp !== b.isSystemApp) {
-              return a.isSystemApp ? 1 : -1;
-            }
-            if (b.combinedScore !== a.combinedScore) {
-              return b.combinedScore - a.combinedScore;
-            }
-            return a.packageName.localeCompare(b.packageName);
+          riskList.push({
+            appName: app.appName,
+            packageName: app.packageName,
+            permissions: grantedPermissions,
+            foregroundMinutes,
+            permissionScore: combinedResult.permissionScore,
+            permissionRiskLevel: combinedResult.permissionRiskLevel,
+            combinedScore: combinedResult.totalScore,
+            combinedRiskLevel: combinedResult.level,
+            riskLevel: combinedResult.level,
+            legacyRiskLevel: legacyRisk,
+            isSystemApp: app.isSystemApp,
+            lastUsedTime,
+            dataUsage,
+            scoreExplanations: combinedResult.explanations,
+            networkFindingsCount: packageFindings.length,
           });
-
-          const now = new Date();
-          const formattedScanTime = `${now.toLocaleDateString('en-GB', {
-            day: '2-digit',
-            month: 'short',
-            year: 'numeric',
-          })}, ${now.toLocaleTimeString('en-US', {
-            hour: '2-digit',
-            minute: '2-digit',
-            hour12: true,
-          })} (${scanReason})`;
-
-          DatabaseHelper.saveScanResults(riskList, formattedScanTime);
-
-          resolve({
-            riskList,
-            formattedScanTime,
-            scanReason,
-            usageAccessGranted: usageGranted,
-          });
-        } finally {
-          isScanInProgress = false;
         }
-      }, 400);
-    });
+      }
+
+      // Deterministic sorting with stable secondary key:
+      riskList.sort((a, b) => {
+        if (a.isSystemApp !== b.isSystemApp) {
+          return a.isSystemApp ? 1 : -1;
+        }
+        if (b.combinedScore !== a.combinedScore) {
+          return b.combinedScore - a.combinedScore;
+        }
+        return a.packageName.localeCompare(b.packageName);
+      });
+
+      const now = new Date();
+      const formattedScanTime = `${now.toLocaleDateString('en-GB', {
+        day: '2-digit',
+        month: 'short',
+        year: 'numeric',
+      })}, ${now.toLocaleTimeString('en-US', {
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: true,
+      })} (${scanReason}${nativeScan ? ' • Real Device Scan' : ''})`;
+
+      DatabaseHelper.saveScanResults(riskList, formattedScanTime);
+
+      return {
+        riskList,
+        formattedScanTime,
+        scanReason,
+        usageAccessGranted: usageGranted,
+      };
+    } finally {
+      isScanInProgress = false;
+    }
   },
 };
