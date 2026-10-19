@@ -10,7 +10,7 @@ class DatabaseHelper(context: Context) :
 
     companion object {
         private const val DB_NAME = "permguard.db"
-        private const val DB_VERSION = 2
+        private const val DB_VERSION = 3
         private const val TABLE_NAME = "scan_results"
         private const val COL_ID = "id"
         private const val COL_APP_NAME = "app_name"
@@ -21,7 +21,11 @@ class DatabaseHelper(context: Context) :
         private const val COL_IS_SYSTEM = "is_system_app"
         private const val COL_SCAN_TIME = "scan_time"
         private const val COL_LAST_USED = "last_used_time"
+        private const val COL_MOBILE_BYTES = "mobile_bytes"
+        private const val COL_WIFI_BYTES = "wifi_bytes"
     }
+
+
 
     override fun onCreate(db: SQLiteDatabase) {
         val createTable = """
@@ -34,7 +38,9 @@ class DatabaseHelper(context: Context) :
                 $COL_RISK_LEVEL TEXT,
                 $COL_IS_SYSTEM INTEGER,
                 $COL_SCAN_TIME TEXT,
-                $COL_LAST_USED TEXT
+                $COL_LAST_USED TEXT,
+                $COL_MOBILE_BYTES INTEGER,
+                $COL_WIFI_BYTES INTEGER
             )
         """.trimIndent()
         db.execSQL(createTable)
@@ -60,6 +66,8 @@ class DatabaseHelper(context: Context) :
                     put(COL_IS_SYSTEM, if (app.isSystemApp) 1 else 0)
                     put(COL_SCAN_TIME, scanTime)
                     put(COL_LAST_USED, app.lastUsedTime)
+                    put(COL_MOBILE_BYTES, app.dataUsage?.mobileBytes)
+                    put(COL_WIFI_BYTES, app.dataUsage?.wifiBytes)
                 }
                 db.insert(TABLE_NAME, null, values)
             }
@@ -85,6 +93,8 @@ class DatabaseHelper(context: Context) :
                 val isSystem = it.getInt(it.getColumnIndexOrThrow(COL_IS_SYSTEM)) == 1
                 val lastUsed = it.getString(it.getColumnIndexOrThrow(COL_LAST_USED)) ?: "Unknown"
                 scanTime = it.getString(it.getColumnIndexOrThrow(COL_SCAN_TIME))
+                val mobileBytes = it.getLong(it.getColumnIndexOrThrow(COL_MOBILE_BYTES))
+                val wifiBytes = it.getLong(it.getColumnIndexOrThrow(COL_WIFI_BYTES))
 
                 results.add(
                     AppRisk(
@@ -94,7 +104,8 @@ class DatabaseHelper(context: Context) :
                         foregroundMinutes = foregroundMin,
                         riskLevel = riskLevel,
                         isSystemApp = isSystem,
-                        lastUsedTime = lastUsed
+                        lastUsedTime = lastUsed,
+                        dataUsage = DataUsageInfo(mobileBytes = mobileBytes, wifiBytes = wifiBytes)
                     )
                 )
             }

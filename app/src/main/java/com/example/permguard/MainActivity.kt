@@ -41,7 +41,8 @@ data class AppRisk(
     val foregroundMinutes: Long,
     val riskLevel: String,
     val isSystemApp: Boolean,
-    val lastUsedTime: String = "Unknown"
+    val lastUsedTime: String = "Unknown",
+    val dataUsage: DataUsageInfo? = null
 )
 
 class MainActivity : ComponentActivity() {
